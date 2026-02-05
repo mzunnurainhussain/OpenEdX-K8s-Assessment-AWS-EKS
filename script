@@ -1,0 +1,170 @@
+
+---
+
+## 3) scripts/deploy.sh (paste fully)
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ==========================
+# CONFIG (EDIT THESE)
+# ==========================
+AWS_REGION="${AWS_REGION:-us-east-1}"
+CLUSTER_NAME="${CLUSTER_NAME:-openedx-eks}"
+K8S_VERSION="${K8S_VERSION:-1.29}"
+NODE_TYPE="${NODE_TYPE:-t3.large}"
+NODE_COUNT="${NODE_COUNT:-3}"
+
+# Domain used for LMS/CMS
+LMS_HOST="${LMS_HOST:-lms.example.com}"
+CMS_HOST="${CMS_HOST:-studio.example.com}"
+
+# Namespace isolation
+NAMESPACE="${NAMESPACE:-openedx}"
+
+# ACM certificate ARN for TLS (recommended)
+ACM_CERT_ARN="${ACM_CERT_ARN:-arn:aws:acm:REGION:ACCOUNT:certificate/XXXX}"
+
+# External data endpoints (EDIT THESE)
+MYSQL_HOST="${MYSQL_HOST:-mysql.example.rds.amazonaws.com}"
+MYSQL_PORT="${MYSQL_PORT:-3306}"
+MYSQL_DB="${MYSQL_DB:-openedx}"
+MYSQL_USER="${MYSQL_USER:-openedx}"
+MYSQL_PASS="${MYSQL_PASS:-CHANGE_ME}"
+
+MONGO_URI="${MONGO_URI:-mongodb://USER:PASS@HOST:27017/edxapp?replicaSet=rs0}"
+REDIS_HOST="${REDIS_HOST:-redis.example.cache.amazonaws.com}"
+REDIS_PORT="${REDIS_PORT:-6379}"
+
+# Elasticsearch/OpenSearch endpoint
+SEARCH_HOST="${SEARCH_HOST:-https://search-example-domain.us-east-1.es.amazonaws.com}"
+
+# ==========================
+# CHECKS
+# ==========================
+command -v aws >/dev/null || { echo "aws CLI missing"; exit 1; }
+command -v kubectl >/dev/null || { echo "kubectl missing"; exit 1; }
+command -v helm >/dev/null || { echo "helm missing"; exit 1; }
+command -v eksctl >/dev/null || { echo "eksctl missing"; exit 1; }
+
+echo "==> Creating / updating EKS cluster: ${CLUSTER_NAME} in ${AWS_REGION}"
+
+# ==========================
+# 1) CREATE EKS (eksctl)
+# ==========================
+cat > /tmp/eksctl-openedx.yaml <<EOF
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+metadata:
+  name: ${CLUSTER_NAME}
+  region: ${AWS_REGION}
+  version: "${K8S_VERSION}"
+
+managedNodeGroups:
+  - name: ng-openedx
+    instanceType: ${NODE_TYPE}
+    desiredCapacity: ${NODE_COUNT}
+    minSize: ${NODE_COUNT}
+    maxSize: $((NODE_COUNT + 2))
+    volumeSize: 80
+    privateNetworking: true
+    iam:
+      withAddonPolicies:
+        autoScaler: true
+        albIngress: true
+        cloudWatch: true
+EOF
+
+eksctl create cluster -f /tmp/eksctl-openedx.yaml || eksctl upgrade cluster -f /tmp/eksctl-openedx.yaml
+
+echo "==> Updating kubeconfig"
+aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER_NAME"
+
+# ==========================
+# 2) ENABLE OIDC (IRSA)
+# ==========================
+echo "==> Enabling IAM OIDC provider"
+eksctl utils associate-iam-oidc-provider --cluster "$CLUSTER_NAME" --region "$AWS_REGION" --approve
+
+# ==========================
+# 3) INSTALL AWS LB CONTROLLER
+# ==========================
+echo "==> Installing AWS Load Balancer Controller"
+helm repo add eks https://aws.github.io/eks-charts >/dev/null
+helm repo update >/dev/null
+
+# Create IAM service account for LB controller
+eksctl create iamserviceaccount \
+  --cluster "$CLUSTER_NAME" \
+  --region "$AWS_REGION" \
+  --namespace kube-system \
+  --name aws-load-balancer-controller \
+  --attach-policy-arn arn:aws:iam::aws:policy/AWSLoadBalancerControllerIAMPolicy \
+  --override-existing-serviceaccounts \
+  --approve || true
+
+VPC_ID="$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" --query "cluster.resourcesVpcConfig.vpcId" --output text)"
+
+helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
+  -n kube-system \
+  --set clusterName="$CLUSTER_NAME" \
+  --set serviceAccount.create=false \
+  --set serviceAccount.name=aws-load-balancer-controller \
+  --set region="$AWS_REGION" \
+  --set vpcId="$VPC_ID"
+
+# ==========================
+# 4) INSTALL NGINX INGRESS (REPLACES CADDY)
+# ==========================
+echo "==> Installing Nginx Ingress Controller"
+helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx >/dev/null
+helm repo update >/dev/null
+
+helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+  -n ingress-nginx --create-namespace \
+  -f kubernetes/ingress/nginx-ingress-values.yaml
+
+# ==========================
+# 5) CREATE NAMESPACE + SECRETS
+# ==========================
+echo "==> Creating namespace: $NAMESPACE"
+kubectl apply -f kubernetes/manifests/00-namespace.yaml
+
+echo "==> Creating OpenEdX external DB secrets (DO NOT COMMIT REAL PASSWORDS)"
+kubectl -n "$NAMESPACE" delete secret openedx-external-services --ignore-not-found
+kubectl -n "$NAMESPACE" create secret generic openedx-external-services \
+  --from-literal=MYSQL_HOST="$MYSQL_HOST" \
+  --from-literal=MYSQL_PORT="$MYSQL_PORT" \
+  --from-literal=MYSQL_DB="$MYSQL_DB" \
+  --from-literal=MYSQL_USER="$MYSQL_USER" \
+  --from-literal=MYSQL_PASS="$MYSQL_PASS" \
+  --from-literal=MONGO_URI="$MONGO_URI" \
+  --from-literal=REDIS_HOST="$REDIS_HOST" \
+  --from-literal=REDIS_PORT="$REDIS_PORT" \
+  --from-literal=SEARCH_HOST="$SEARCH_HOST"
+
+# ==========================
+# 6) INSTALL TUTOR + tutor-k8s DEPLOYMENT
+# ==========================
+echo "==> Installing Tutor + tutor-k8s (assumes tutor installed locally)"
+command -v tutor >/dev/null || { echo "Tutor is required on local machine"; exit 1; }
+
+# Make sure plugins are enabled
+tutor plugins enable k8s || true
+
+# Configure hosts
+tutor config save --set LMS_HOST="$LMS_HOST" --set CMS_HOST="$CMS_HOST"
+
+# NOTE:
+# Actual external DB wiring depends on Tutor config overlays.
+# We store endpoints in K8s secret above and reference them in overrides.
+# Put any custom overrides in tutor/overrides.yml
+echo "==> Applying Tutor Kubernetes resources"
+tutor k8s quickstart --namespace "$NAMESPACE" || true
+
+# Optional: Apply your custom manifests (HPA, probes overrides, etc.)
+echo "==> Applying HPA templates"
+kubectl apply -f kubernetes/hpa/lms-hpa.yaml || true
+kubectl apply -f kubernetes/hpa/cms-hpa.yaml || true
+
+echo "==> Deployment completed. Validate with scripts/validate.sh"
