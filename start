@@ -1,0 +1,22 @@
+5. Quick Start (High-Level)
+5.1 Prerequisites
+
+AWS account with IAM permissions for EKS, VPC, ALB, CloudFront, WAF, RDS/DocDB/OpenSearch/ElastiCache, EBS/EFS
+
+CLI tools:
+
+aws, kubectl, helm, eksctl, jq
+
+tutor (latest stable) and tutor-k8s plugin
+
+Domain + TLS certificate (ACM recommended)
+
+5.2 Deploy
+chmod +x scripts/*.sh
+./scripts/deploy.sh
+
+5.3 Validate
+./scripts/validate.sh
+
+5.4 Backup
+./scripts/backup.sh
