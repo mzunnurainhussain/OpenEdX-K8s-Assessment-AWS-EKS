@@ -1,0 +1,8 @@
+mkdir -p docs kubernetes/{manifests,ingress,hpa,external-secrets} tutor nginx scripts monitoring diagrams
+touch README.md docs/deployment-guide.md docs/troubleshooting.md docs/decisions.md
+touch scripts/deploy.sh scripts/backup.sh scripts/restore.sh scripts/validate.sh
+touch kubernetes/manifests/00-namespace.yaml kubernetes/manifests/01-secrets-template.yaml
+touch kubernetes/ingress/nginx-ingress-values.yaml
+touch kubernetes/hpa/lms-hpa.yaml kubernetes/hpa/cms-hpa.yaml
+touch nginx/notes.md
+touch monitoring/notes.md
