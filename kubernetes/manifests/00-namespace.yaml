@@ -7,21 +7,4 @@ metadata:
     name: openedx
 
 
-kubernetes/manifests/01-secrets-template.yaml (do NOT put real passwords)
 
-apiVersion: v1
-kind: Secret
-metadata:
-  name: openedx-external-services
-  namespace: openedx
-type: Opaque
-stringData:
-  MYSQL_HOST: "CHANGE_ME"
-  MYSQL_PORT: "3306"
-  MYSQL_DB: "openedx"
-  MYSQL_USER: "openedx"
-  MYSQL_PASS: "CHANGE_ME"
-  MONGO_URI: "mongodb://USER:PASS@HOST:27017/edxapp"
-  REDIS_HOST: "CHANGE_ME"
-  REDIS_PORT: "6379"
-  SEARCH_HOST: "https://CHANGE_ME"
